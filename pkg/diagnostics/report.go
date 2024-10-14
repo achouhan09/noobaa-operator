@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	nbv1 "github.com/noobaa/noobaa-operator/v5/pkg/apis/noobaa/v1alpha1"
 	"github.com/noobaa/noobaa-operator/v5/pkg/bundle"
 	"github.com/noobaa/noobaa-operator/v5/pkg/options"
 	"github.com/noobaa/noobaa-operator/v5/pkg/util"
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -36,6 +39,22 @@ func RunReport(cmd *cobra.Command, args []string) {
 		log.Fatalf(`❌ Could not get endpoint Deployment %q in Namespace %q`,
 			endpointApp.Name, endpointApp.Namespace)
 	}
+
+	// Fetching all Backingstores
+	bsList := &nbv1.BackingStoreList{
+		TypeMeta: metav1.TypeMeta{Kind: "BackingStoreList"},
+	}
+	if !util.KubeList(bsList, &client.ListOptions{Namespace: options.Namespace}) {
+		log.Fatalf(`❌ Could not get backingstores in Namespace %q`, options.Namespace)
+	}
+
+	// Fetching all Namespacestores
+	nsList := &nbv1.NamespaceStoreList{
+		TypeMeta: metav1.TypeMeta{Kind: "NamespaceStoreList"},
+	}
+	if !util.KubeList(nsList, &client.ListOptions{Namespace: options.Namespace}) {
+		log.Fatalf(`❌ Could not get namespacestores in Namespace %q`, options.Namespace)
+	}
 	fmt.Println("")
 
 	// retrieving the status of proxy environment variables
@@ -43,6 +62,9 @@ func RunReport(cmd *cobra.Command, args []string) {
 
 	// retrieving the overridden env variables using `CONFIG_JS_` prefix
 	overriddenEnvVar(coreApp, endpointApp)
+
+	// validating ARNs for backingstore and namespacestore
+	arnValidationCheck(bsList, nsList)
 
 	// TODO: Add support for additional features
 }
@@ -69,6 +91,61 @@ func overriddenEnvVar(coreApp *appsv1.StatefulSet, endpointApp *appsv1.Deploymen
 	printOverriddenEnvVar(appNoobaaCore, coreApp.Spec.Template.Spec.Containers[0].Env)
 
 	printOverriddenEnvVar(appNoobaaEndpoint, endpointApp.Spec.Template.Spec.Containers[0].Env)
+
+	fmt.Println("")
+}
+
+// arnValidationCheck validates the ARNs for backingstores and namespacestores
+func arnValidationCheck(bsList *nbv1.BackingStoreList, nsList *nbv1.NamespaceStoreList) {
+	log := util.Logger()
+
+	log.Print("⏳ Performing validation check for ARNs...\n")
+	foundARNString := false
+
+	// Validate ARNs for backingstores
+	fmt.Print("ARN Validation Check (BACKINGSTORES):\n----------------------------------\n")
+	for _, bs := range bsList.Items {
+		if bs.Spec.AWSS3 != nil {
+			if bs.Spec.AWSS3.AWSSTSRoleARN != nil {
+				arn := *bs.Spec.AWSS3.AWSSTSRoleARN
+				if isValidArn(&arn) {
+					fmt.Printf("	✅ Backingstore \"%s\":\n\t   ARN: %s\n\t   Status: ✅ Valid\n", bs.Name, arn)
+				} else {
+					fmt.Printf("	⚠️  Backingstore \"%s\":\n\t   ARN: %s\n\t   Status: ⚠️ Invalid (Not an S3 bucket ARN)\n", bs.Name, arn)
+				}
+				fmt.Println("")
+				foundARNString = true
+			}
+		}
+	}
+
+	if !foundARNString {
+		fmt.Print("	❌ No aws sts arn string found.\n")
+	}
+	fmt.Println("")
+
+	foundARNString = false
+	// Validate ARNs for namespacestores
+	fmt.Print("ARN Validation Check (NAMESPACESTORES):\n----------------------------------\n")
+	for _, ns := range nsList.Items {
+		if ns.Spec.AWSS3 != nil {
+			if ns.Spec.AWSS3.AWSSTSRoleARN != nil {
+				arn := *ns.Spec.AWSS3.AWSSTSRoleARN
+				if isValidArn(&arn) {
+					fmt.Printf("	✅ Namespacestore \"%s\":\n\t   ARN: %s\n\t   Status: ✅ Valid\n", ns.Name, arn)
+				} else {
+					fmt.Printf("	⚠️  Namespacestore \"%s\":\n\t   ARN: %s\n\t   Status: ⚠️ Invalid (Not an S3 bucket ARN)\n", ns.Name, arn)
+				}
+				fmt.Println("")
+				foundARNString = true
+			}
+		}
+	}
+
+	if !foundARNString {
+		fmt.Print("	❌ No aws sts arn string found.\n")
+	}
+	fmt.Println("")
 
 	fmt.Println("")
 }
@@ -101,4 +178,9 @@ func printOverriddenEnvVar(appName string, envVars []corev1.EnvVar) {
 		fmt.Print("	❌ No overridden environment variables found.\n")
 	}
 	fmt.Println("")
+}
+
+// isValidArn is a function to validate the ARN format for an s3 buckets
+func isValidArn(arn *string) bool {
+	return strings.HasPrefix(*arn, "arn:aws:s3:::") && len(*arn) > len("arn:aws:s3:::")
 }
